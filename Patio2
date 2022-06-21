@@ -1,0 +1,423 @@
+import sensor, image, time,utime,servo
+import pyb
+from pyb import LED
+import car
+from pid import PID
+from vl53l1x import VL53L1X
+from time import sleep_ms
+from servo import Servos
+from machine import I2C, Pin
+
+rho_pid = PID(p=0.4, i=0.1)
+
+LED(1).on()
+LED(2).on()
+LED(3).on()
+
+import sensor, image, time, math
+sensor.reset() # 初始化sensor.
+sensor.set_hmirror(True)#水平方向翻转
+sensor.set_vflip(True)#垂直方向翻转
+sensor.set_pixformat(sensor.GRAYSCALE) # or sensor.RGB565
+sensor.set_framesize(sensor.QQVGA) # 320*240
+sensor.skip_frames(30) # 让新的设置生效
+sensor.set_gainceiling(8)
+clock = time.clock() # 跟踪FPS帧率
+#Tamura纹理提取
+
+#------------无线通信定义--------
+communication=pyb.Pin("P6",pyb.Pin.OUT_PP)
+
+
+#------------循线函数定义--------
+def get_middle_line(Avg):
+    sorted_list, sorted_index = bubble_sort(Avg)
+    for i in range(25):
+        Avg[sorted_index[15+i]] = 0
+    half_sum = int(sum(Avg) / 2)
+    temp = 0
+    for i in range(39):
+        temp += Avg[i]
+        if temp >= half_sum:
+            if i<13:
+                i=13
+            if i>21:
+               i=21
+            return i
+
+def bubble_sort(alist): #从小到大排序
+    length = len(alist)
+    line_list = list(range(length))
+    for i in range(length - 1):
+        # i表示比较多少轮
+        for j in range(length - i - 1):
+            # j表示每轮比较的元素的范围，因为每比较一轮就会排序好一个元素的位置（每一轮确定一个现最大值），
+            # 所以在下一轮比较的时候就少比较了一个元素，所以要减去i
+            if alist[j] > alist[j + 1]:
+                alist[j], alist[j + 1] = alist[j + 1], alist[j]
+                line_list[j], line_list[j + 1] = line_list[j + 1], line_list[j]
+    return alist, line_list
+
+def find_path():
+    Avg=[]
+    for i in range(40): #将图片320*240分成40列
+          statistics=img.get_statistics(roi=(i*8,0,1,240))
+          avg=statistics.mean()
+          Avg.append(avg) #计算每块的平均灰度值
+          #print(Avg)
+    nth=get_middle_line(Avg)
+    img.draw_line((nth*8,0,nth*8,240), color= 255)
+    rho_err = nth*8-160
+    rho_output = rho_pid.get_pid(rho_err,1)
+    car.run(25+rho_output, 25-rho_output)
+#----------------------------------------------------------
+
+#-------超声波函数定义---------------------------------------
+#超声波模块初始化
+wave_echo_pin = Pin('P1', Pin.IN, Pin.PULL_NONE)
+wave_trig_pin = Pin('P0', Pin.OUT_PP, Pin.PULL_DOWN)
+
+wave_distance=0
+tim_counter = 0
+flag_wave = 0
+
+#超声波启动
+def wave_start():
+    wave_trig_pin.value(1)
+    utime.sleep_us(15)
+    wave_trig_pin.value(0)
+
+#超声波距离计算
+def wave_distance_calculation():
+    #全局变量声明
+    global tim_counter
+    #频率f为0.2MHZ 高电平时间t=计数值*1/f
+    wave_distance = tim_counter*5*0.017
+    return wave_distance
+
+#超声波数据处理
+def wave_distance_process():
+    global flag_wave
+    wd=0
+    extint.disable()
+    if(flag_wave == 0):
+        wave_start()
+    if(flag_wave == 2):
+        wd=wave_distance_calculation()
+        flag_wave = 0
+    return wd
+
+#配置定时器
+tim =pyb.Timer(2, prescaler=720, period=65535)  #相当于freq=0.2M
+
+#外部中断配置
+def callback(line):
+    global flag_wave,tim_counter
+    #上升沿触发处理
+    if(wave_echo_pin.value()):
+        tim.init(prescaler=720, period=65535)
+        flag_wave = 1
+    #下降沿
+    else:
+        tim.deinit()
+        tim_counter = tim.counter()
+        tim.counter(0)
+        flag_wave = 2
+
+#中断配置
+extint = pyb.ExtInt(wave_echo_pin, pyb.ExtInt.IRQ_RISING_FALLING, pyb.Pin.PULL_DOWN, callback)
+buf=0
+#--------------------------------------------------------------------
+
+#-------------光学测距定义-----------
+
+#--------------------------------
+
+
+#---------------追色块------
+def find_max(blobs):
+     max_size=0
+     for blob in blobs:
+          if blob[2]*blob[3] > max_size:
+              max_blob=blob
+              max_size = blob[2]*blob[3]
+     return max_blob
+#-------------------------
+
+#-----------超声波循线-------------
+def micro_find_path():
+    pre_dist=40
+    distance=wave_distance_process()
+    #print('distance :',distance)
+    if (distance!=0):
+        if(distance<1000):
+            true_dist=distance
+            print(true_dist,'cm')
+    while(true_dist):
+        rho_err_2=true_dist-pre_dist
+        rho_output_2=rho_pid.get_pid(rho_err_2,1)
+        car.run(25+rho_output_2, 30-rho_output_2)
+    extint.enable()
+    buf+=1
+    img = sensor.snapshot()
+    IMG=img.find_edges(image.EDGE_CANNY, threshold=(90,150)) #threshold:控制边缘质量 这里用的是学长的参数
+#-----------------------------------------------------
+
+shape = 3 #2是三角，3是正方形，1是圆
+flag=0 #步骤：0是直走，1是找形状
+i2c = I2C(sda=Pin('P5'), scl=Pin('P4'))
+servo = Servos(i2c, address=0x40, freq=50, min_us=500, max_us=2500, degrees=270)
+servo.position(0, 75)
+pyb.delay(5000)
+while(True):
+    turn_velocity = 50
+    left_velocity = 45
+    right_velocity = 48
+    r90=9 #右转90度时间
+    L90=11 #左转90度时间
+    L180=24 #左转180度的时间
+    stop=30
+    str_1=63 #第一次走直线时间
+    str_12=7
+    str_21=72 #shape1的直行时间
+    r45=5 #右转45度时间
+
+    str_22=127 # shape2的直行时间
+
+    str_23=72 # shape3的直行时间
+    L45=6 #左转45度时间
+    r135=14 #右转135度时间
+
+    lightstop_dist=400 #感光检测到栏杆停止的距离
+    drop_dist=150  #感光检测投篮停止距离
+    ultrolsonic_dist=15  #超声波停止距离
+
+    str_3=40 #直行到无线通信
+    str_4=10 #短距离直行到发送点
+    str_5=40 #最终直行到终点
+
+    if flag ==0: #走向starting point,左转90度
+        for i in range (str_1+L90+str_12):
+            if i < str_1:
+                car.run(left_velocity,right_velocity)
+            if i >= str_1 and i<L90 + str_1 :
+                car.run(0,turn_velocity)
+            if i >= L90 + str_1  and i<L90 + str_1+str_12 :
+                car.run(left_velocity,right_velocity)
+            sleep_ms(100)
+        car.run(0,0)
+        pyb.delay(800)
+        flag=flag+1
+    if flag ==1: #形状识别的路径
+        if shape == 1: #右转45度，直行，右转45度
+            for i in range (str_21+r45+stop+3):
+                if i < r45:
+                    car.run(turn_velocity,0)
+                if i >=r45 and i<r45+str_21:
+                    car.run(45,48)
+                if i >=r45+str_21 and i<r45+str_21+stop:
+                    car.run(0,0)
+                if i >=r45+str_21+stop and i<r45+str_21+stop+3:
+                    car.run(turn_velocity,0)
+                sleep_ms(100)
+        elif shape==2: #直行，右转90度
+            for i in range (str_22+r90+stop):
+                if i < str_22:
+                    car.run(45,50)
+                if i >=str_22 and i<str_22+stop:
+                    car.run(0,0)
+                if i >=str_22+stop and i<r90+str_22+stop:
+                    car.run(turn_velocity,0)
+                sleep_ms(100)
+        elif shape==3: #左转45度，直行，右转135度
+             for i in range (str_23+L45+r135+stop):
+                if i < L45:
+                    car.run(0,turn_velocity)
+                if i >=L45 and i<L45+str_23:
+                    car.run(45,50)
+                if i >=L45+str_23 and i<L45+str_23+stop:
+                    car.run(0,0)
+                if i >=L45+str_23+stop and i<L45+str_23+stop+r135:
+                    car.run(turn_velocity,0)
+                sleep_ms(100)
+        flag=flag+1
+    if flag==2: #走向栏杆，左转
+        i2clight = I2C(2)
+        light_define = VL53L1X(i2clight)
+        light_dist=light_define.read()
+        print('light_dist_flag2',light_dist)
+        while(light_dist>lightstop_dist): #直行
+            car.run(20,22)
+            i2clight = I2C(2)
+            light_define = VL53L1X(i2clight)
+            light_dist=light_define.read()
+            print('light_dist_flag2',light_dist)
+        car.run(0,0)
+        pyb.delay(200)
+        for i in range (12):
+            if i < 12:
+                car.run(0,turn_velocity)
+            sleep_ms(100)
+        car.run(0,0)
+        pyb.delay(1000)
+        flag=flag+1
+    if flag==3: #超声波沿栏杆行走+拐第一个弯
+        i2clight = I2C(2)
+        light_define = VL53L1X(i2clight)
+        light_dist=light_define.read()
+        print('light_dist3',light_dist)
+        while(light_dist>350): #光学一直探测
+            pre_dist=40
+            distance=wave_distance_process()
+            if (distance!=0):
+                if(distance<300):
+                    true_dist=distance
+                    print(true_dist,'-3-cm')
+            else:
+                    true_dist=False
+            while(true_dist):
+                rho_err_2=true_dist-pre_dist
+                rho_output_2=rho_pid.get_pid(rho_err_2,1)
+                car.run(22+rho_output_2, 24-rho_output_2)
+                break
+            extint.enable()
+            buf+=1
+            img = sensor.snapshot()
+            IMG=img.find_edges(image.EDGE_CANNY, threshold=(90,150)) #threshold:控制边缘质量 这里用的是学长的参数
+            light_dist=light_define.read()
+            print('light_dist3',light_dist)
+        for i in range (L90):
+            if i < L90:
+                car.run(0,turn_velocity)
+            sleep_ms(100)
+        car.run(0,0)
+        pyb.delay(1000)
+        flag=flag+1
+    if flag==4: #走向投篮处+拐最后一个弯
+        i2clight = I2C(2)
+        light_define = VL53L1X(i2clight)
+        light_dist=light_define.read()
+        print(light_dist)
+        while(light_dist>350): #光学一直探测
+            pre_dist=40
+            distance=wave_distance_process()
+            if (distance!=0):
+                if(distance<300):
+                    true_dist=distance
+                    print(true_dist,'-4-cm')
+            else:
+                    true_dist=False
+            while(true_dist):
+                rho_err_2=true_dist-pre_dist
+                rho_output_2=rho_pid.get_pid(rho_err_2,1)
+                car.run(25+rho_output_2, 27-rho_output_2)
+                break
+            extint.enable()
+            buf+=1
+            img = sensor.snapshot()
+            IMG=img.find_edges(image.EDGE_CANNY, threshold=(90,150)) #threshold:控制边缘质量 这里用的是学长的参数
+            light_dist=light_define.read()
+            print('light_dist3',light_dist)
+        for i in range (L90):
+            if i < L90:
+                car.run(0,turn_velocity)
+            sleep_ms(100)
+        car.run(0,0)
+        pyb.delay(1000)
+        flag=flag+1
+    if flag==5: #在投篮处停止，转向90度
+        i2clight = I2C(2)
+        light_define = VL53L1X(i2clight)
+        light_dist=light_define.read()
+        print('light_dist3',light_dist)
+        while(light_dist>380): #光学一直探测
+            light_dist=light_define.read()
+            print('light_dist3',light_dist)
+            pre_dist=40
+            distance=wave_distance_process()
+            if (distance!=0):
+                if(distance<300):
+                    true_dist=distance
+                    print(true_dist,'cm')
+            else:
+                    true_dist=False
+            while(true_dist):
+                rho_err_2=true_dist-pre_dist
+                rho_output_2=rho_pid.get_pid(rho_err_2,1)
+                car.run(29+rho_output_2, 29-rho_output_2)
+                break
+            extint.enable()
+            buf+=1
+            img = sensor.snapshot()
+            IMG=img.find_edges(image.EDGE_CANNY, threshold=(90,150)) #threshold:控制边缘质量 这里用的是学长的参数
+        car.run(0,0)
+        pyb.delay(500)
+        for i in range (11):
+            if i < 11:
+                car.run(0,50)
+            sleep_ms(100)
+        car.run(0,0)
+        pyb.delay(500)
+        flag=flag+1
+    if flag==6: #投篮
+        i2c = I2C(sda=Pin('P5'), scl=Pin('P4'))
+        servo = Servos(i2c, address=0x40, freq=50, min_us=500, max_us=2500, degrees=270)
+        for i in range (10):
+            print (i)
+            if i == 1:
+                servo.position(1, 80)
+            elif i == 3:
+                servo.position(0, 150)
+            elif i == 5:
+                servo.position(0, 80)
+            elif i == 7:
+                servo.position(1, 270)
+            sleep_ms(1000)
+        flag=flag+1
+    if flag==7: #追色块
+        sensor.reset() # Initialize the camera sensor.
+        sensor.set_hmirror(True)#水平方向翻转
+        sensor.set_vflip(True)#垂直方向翻转
+        sensor.set_pixformat(sensor.RGB565) # use RGB565.
+        sensor.set_framesize(sensor.QQVGA) # use QQVGA for speed.
+        sensor.skip_frames(10) # Let new settings take affect.
+        sensor.set_auto_whitebal(False) # turn this off.
+        clock = time.clock() # Tracks FPS.
+        yellow_threshold   = (100, 64, -128, 127, 127, 29)
+        size_threshold = 2000
+        x_pid = PID(p=0.5, i=1, imax=100)
+
+        while(True):
+            clock.tick() # Track elapsed milliseconds between snapshots().
+            img = sensor.snapshot() # Take a picture and return the image.
+            blobs = img.find_blobs([yellow_threshold])
+            if blobs:
+                max_blob = find_max(blobs)
+                x_error = max_blob[5]-img.width()/2
+                h_error = max_blob[2]*max_blob[3]-size_threshold
+                if h_error > 0:
+                    break
+                print("x error: ", x_error)
+                img.draw_rectangle(max_blob[0:4]) # rect
+                img.draw_cross(max_blob[5], max_blob[6]) # cx, cy
+                x_output=x_pid.get_pid(x_error,1)
+                print("x_output",x_output)
+                car.run(29+x_output,33-x_output)
+            else:
+                car.run(0,25)
+        flag=flag+1
+    if flag==8: #发无线通信
+        car.run(0,0)
+        communication.high()
+        pyb.delay(2000)
+        communication.low()
+        flag=flag+1
+    #print('flag:',flag)
+
+
+
+
+
+
+
+
