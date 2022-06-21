@@ -1,0 +1,132 @@
+import sensor, image, time, pid, car, pyb, utime
+from pid import PID
+from pyb import Pin
+from pyb import UART
+from time import sleep_ms
+from pyb import delay
+from pyb import LED
+rho_pid = PID(p=0.4, i=0.1)
+LED(1).on()
+LED(2).on()
+LED(3).on()
+import sensor, image, time, math
+sensor.reset()
+sensor.set_hmirror(True)
+sensor.set_vflip(True)
+sensor.set_pixformat(sensor.GRAYSCALE)
+sensor.set_framesize(sensor.QVGA)
+sensor.skip_frames(30)
+sensor.set_gainceiling(8)
+clock = time.clock()
+def get_middle_line(Avg):
+    sorted_list, sorted_index = bubble_sort(Avg)
+    for i in range(25):
+        Avg[sorted_index[i]] = 0
+    half_sum = int(sum(Avg) / 2)
+    temp = 0
+    for i in range(39):
+        temp += Avg[i]
+        if temp >= half_sum:
+            return i
+def bubble_sort(alist):
+    length = len(alist)
+    line_list = list(range(length))
+    for i in range(length - 1):
+        for j in range(length - i - 1):
+            if alist[j] > alist[j + 1]:
+                alist[j], alist[j + 1] = alist[j + 1], alist[j]
+                line_list[j], line_list[j + 1] = line_list[j + 1], line_list[j]
+    return alist, line_list
+def find_path():
+    Avg=[]
+    for i in range(40):
+          statistics=img.get_statistics(roi=(i*8,0,1,240))
+          avg=statistics.mean()
+          Avg.append(avg)
+    nth=get_middle_line(Avg)
+    img.draw_line((nth*8,0,nth*8,240), color= 255)
+    rho_err = nth*8-160
+    rho_output = rho_pid.get_pid(rho_err,1)
+    car.run(25+rho_output, 30-rho_output)
+wave_echo_pin = Pin('P1', Pin.IN, Pin.PULL_NONE)
+wave_trig_pin = Pin('P0', Pin.OUT_PP, Pin.PULL_DOWN)
+wave_distance=0
+tim_counter = 0
+flag_wave = 0
+def wave_start():
+    wave_trig_pin.value(1)
+    utime.sleep_us(15)
+    wave_trig_pin.value(0)
+def wave_distance_calculation():
+    global tim_counter
+    wave_distance = tim_counter*5*0.017
+    return wave_distance
+def wave_distance_process():
+    global flag_wave
+    wd=0
+    extint.disable()
+    if(flag_wave == 0):
+        wave_start()
+    if(flag_wave == 2):
+        wd=wave_distance_calculation()
+        flag_wave = 0
+    return wd
+tim =pyb.Timer(2, prescaler=720, period=65535)
+def callback(line):
+    global flag_wave,tim_counter
+    if(wave_echo_pin.value()):
+        tim.init(prescaler=720, period=65535)
+        flag_wave = 1
+    else:
+        tim.deinit()
+        tim_counter = tim.counter()
+        tim.counter(0)
+        flag_wave = 2
+extint = pyb.ExtInt(wave_echo_pin, pyb.ExtInt.IRQ_RISING_FALLING, pyb.Pin.PULL_DOWN, callback)
+buf=0
+from time import sleep_ms
+from pyb import delay
+strleft = 46
+strright = 46
+turnleft = 50
+turnright = 0
+flag=1
+while(True):
+    distance=wave_distance_process()
+    print('distance :',distance)
+    x=10
+    a=140
+    b=12
+    y=x+a
+    z=y+b
+    if (distance!=0):
+        if (distance<47):
+            if flag==0:
+               for j in range (x): #右转上桥sleep_ms(100)               distance=wave_distance_process()
+               extint.enable() #更新超声波
+               img = sensor.snapshot()
+               IMG=img.find_edges(image.EDGE_CANNY, threshold=(50,80))
+               while(distance>47 or distance == 0):
+                    car.run(45,46)
+                    distance=wave_distance_process()
+                    extint.enable() #更新超声波
+                    img = sensor.snapshot()
+                    IMG=img.find_edges(image.EDGE_CANNY, threshold=(50,80))
+               for j in range (b): #左转到巡线
+                    car.run(turnright,turnleft)
+                    sleep_ms(100)
+               i=0
+    if flag ==1:
+               for i in range(350): #巡线
+                    img = sensor.snapshot()
+                    IMG=img.find_edges(image.EDGE_CANNY, threshold=(50,80))
+                    find_path()
+                    print(i)w
+                    sleep_ms(5)
+               car.run(0,0)
+               pyb.delay(500000000)
+    extint.enable()
+    img = sensor.snapshot()
+    IMG=img.find_edges(image.EDGE_CANNY, threshold=(50,80))
+
+    find_path()
